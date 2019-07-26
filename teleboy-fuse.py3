@@ -61,11 +61,11 @@ class Teleboy:
     return resp.json()
 
   # Return an array of tuple with station id and label.
-  def tapi_get_channels(self):
-    #channels = self.tapi_get("/epg/broadcasts/now?expand=flags,station,logos,previewImage")
-    channels = self.tapi_get("/epg/broadcasts/now?expand=station")
-    for c in channels['data']['items']:
-      yield (c['station_id'], c['station_label'])
+  def tapi_get_stations(self):
+    #stations = self.tapi_get("/epg/broadcasts/now?expand=flags,station,logos,previewImage")
+    stations = self.tapi_get("/epg/broadcasts/now?expand=station")
+    for s in stations['data']['items']:
+      yield (s['station_id'], s['station_label'])
 
   # Return an array of tuple with id, slug, begin, end, station_id
   def tapi_get_epg(self, station_id, begin, end):
@@ -199,11 +199,10 @@ class Teleboy:
       # Next segment
       offset -= size
       seg_id += 1
-    return end_seg_id, offset, available_size;
 
 class TeleboyFS(LoggingMixIn, Operations):
   def __init__(self, username, password):
-    self.channels = {}
+    self.stations = {}
     self.broadcasts = {}
     now = time.time()
     self.root = {
@@ -230,12 +229,12 @@ class TeleboyFS(LoggingMixIn, Operations):
 
     self.t = Teleboy()
     self.t.login(username, password)
-    self.populate_channel()
+    self.populate_stations()
 
-  def populate_channel(self):
+  def populate_stations(self):
     now = time.time()
-    for station_id,station_label in self.t.tapi_get_channels():
-      self.channels["{:03}-{}".format(station_id,station_label)] = {
+    for station_id,station_label in self.t.tapi_get_stations():
+      self.stations["{:03}-{}".format(station_id,station_label)] = {
         'stat': {
           'st_mode': (S_IFDIR | 0o755),
           'st_ctime': now,
@@ -249,10 +248,9 @@ class TeleboyFS(LoggingMixIn, Operations):
         'is_populated': False
       }
 
-  def populate_broadcast(self, station_id):
+  def populate_broadcasts(self, station_id):
     base_url, seg_id, seg_ext, seg_duration = self.t.seg_get_live_last(station_id)
     now = time.time()
-    i=1
     for id,slug,begin,end,station_id in self.t.tapi_get_epg(station_id, now-(6*60*60), now):
       begin_seg_id = seg_id - int((now - begin)/seg_duration)
       end_seg_id = seg_id - int((now - end)/seg_duration)
@@ -276,14 +274,13 @@ class TeleboyFS(LoggingMixIn, Operations):
         'cache': cache,
         'seg_info': (base_url, begin_seg_id, end_seg_id, seg_ext, seg_duration)
       }
-      i += 1
 
   def get_path2stat(self, path):
     if (path == '/'): return self.root
     if (path == '/config'): return self.config['stat']
     path = path[1:]
-    if path in self.channels:
-      return self.channels[path]['stat']
+    if path in self.stations:
+      return self.stations[path]['stat']
     path = os.path.basename(path)
     if path in self.broadcasts:
       return self.broadcasts[path]['stat']
@@ -319,7 +316,9 @@ class TeleboyFS(LoggingMixIn, Operations):
     return b['id']
 
   def read(self, path, size, offset, fh):
-    if (path == '/config'): return self.config['data'].encode('utf-8')[offset:offset+size]
+    if (path == '/config'):
+      return self.config['data'].encode('utf-8')[offset:offset+size]
+
     slug = os.path.basename(path)
     if not slug in self.broadcasts:
       raise FuseOSError(ENOENT)
@@ -356,15 +355,15 @@ class TeleboyFS(LoggingMixIn, Operations):
 
   def readdir(self, path, fh):
     if(path == '/'):
-      return ['.', '..', 'config'] + [k for k in self.channels]
+      return ['.', '..', 'config'] + [k for k in self.stations]
     else:
       station_label = path[1:]
-      if station_label not in self.channels:
+      if station_label not in self.stations:
         raise FuseOSError(ENOENT)
-      s = self.channels[station_label]
+      s = self.stations[station_label]
       station_id = s['station_id']
       if not s['is_populated']:
-        self.populate_broadcast(station_id)
+        self.populate_broadcasts(station_id)
         s['is_populated'] = True
       return ['.', '..'] + [k for k in self.broadcasts if self.broadcasts[k]['station_id'] == station_id]
 
@@ -400,7 +399,7 @@ class TeleboyFS(LoggingMixIn, Operations):
     if(path == '/config'):
       try: shutil.rmtree('cache') 
       except: pass
-      self.populate_channel()
+      self.populate_stations()
       return len(data)
     else:
       raise FuseOSError(EPERM)
