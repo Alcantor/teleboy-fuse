@@ -216,7 +216,7 @@ class TeleboyFS(LoggingMixIn, Operations):
     }
     self.config = {
       'stat': {
-        'st_mode': (S_IFREG | 0o755),
+        'st_mode': (S_IFREG | 0o666),
         'st_ctime': now,
         'st_mtime': now,
         'st_atime': now,
@@ -259,7 +259,7 @@ class TeleboyFS(LoggingMixIn, Operations):
         os.makedirs(cache)
       self.broadcasts["{:08}-{}.ts".format(id,slug)] = {
         'stat': {
-          'st_mode': (S_IFREG | 0o755),
+          'st_mode': (S_IFREG | 0o444),
           'st_ctime': now,
           'st_mtime': now,
           'st_atime': now,
