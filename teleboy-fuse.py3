@@ -276,6 +276,9 @@ class TeleboyFS(LoggingMixIn, Operations):
           'st_atime': now,
           'st_uid': 0,
           'st_gid': 0,
+          # Size approximation works great with mplayer but not with vlc and kodi.
+          # Those last ones trie to read the end of the file, which causes a lot of HEAD requests.
+          #'st_size': self.t.seg_size_cached(base_url, seg_id, seg_ext, cache)*(end_seg_id-begin_seg_id)
           'st_size': 10000
         },
         'id': id,
