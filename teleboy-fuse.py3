@@ -291,15 +291,24 @@ class TeleboyFS(LoggingMixIn, Operations):
       self.broadcasts[broadcast_path] = ino_dict
       self.broadcasts["{}-{}.ts".format(datetime.fromtimestamp(begin).strftime("%H%M"),slug)] = ino_dict
 
+  # Fill the broadcasts dictionary max every 60 seconds
+  def populate_broadcasts_cached(self, station_ino_dict):
+    now = time.time()
+    if(station_ino_dict['ts_populated'] + self.broadcasts_ls_min_interval < now):
+      station_ino_dict['ts_populated'] = now
+      self.populate_broadcasts(station_ino_dict['station_id'])
+
   # Return the stat dictionary from a given path
   def get_path2stat(self, path):
-    if (path == '/'): return self.root
-    path = path[1:]
-    if path in self.stations:
-      return self.stations[path]['stat']
-    path = os.path.basename(path)
-    if path in self.broadcasts:
-      return self.broadcasts[path]['stat']
+    if path == '/':
+      return self.root
+    path = path.split('/')
+    if len(path) == 2 and path[1] in self.stations:
+      return self.stations[path[1]]['stat']
+    if len(path) == 3 and path[1] in self.stations:
+      self.populate_broadcasts_cached(self.stations[path[1]])
+      if path[2] in self.broadcasts:
+        return self.broadcasts[path[2]]['stat']
     raise FuseOSError(ENOENT)
 
   def chmod(self, path, mode):
@@ -322,19 +331,21 @@ class TeleboyFS(LoggingMixIn, Operations):
     raise FuseOSError(EPERM)
 
   def open(self, path, flags):
-    broadcast_path = os.path.basename(path)
-    if not broadcast_path in self.broadcasts:
+    path = path.split('/')
+    if len(path) != 3 or path[1] not in self.stations:
       raise FuseOSError(ENOENT)
-    b = self.broadcasts[broadcast_path]
+    self.populate_broadcasts_cached(self.stations[path[1]])
+    if path[2] not in self.broadcasts:
+      raise FuseOSError(ENOENT)
 
     # File handle is the EPG id
-    return b['id']
+    return self.broadcasts[path[2]]['id']
 
   def read(self, path, size, offset, fh):
-    broadcast_path = os.path.basename(path)
-    if not broadcast_path in self.broadcasts:
+    path = path.split('/')
+    if len(path) != 3 or path[1] not in self.stations or path[2] not in self.broadcasts:
       raise FuseOSError(ENOENT)
-    b = self.broadcasts[broadcast_path]
+    b = self.broadcasts[path[2]]
 
     # Variables
     base_url, seg_begin_id, seg_end_id, seg_ext, seg_duration = b['seg_info']
@@ -365,18 +376,13 @@ class TeleboyFS(LoggingMixIn, Operations):
     return data
 
   def readdir(self, path, fh):
-    if(path == '/'):
-      return ['.', '..'] + [k for k in self.stations]
-    else:
-      station_path = path[1:]
-      if station_path not in self.stations:
-        raise FuseOSError(ENOENT)
-      s = self.stations[station_path]
-      now = time.time()
-      if(s['ts_populated'] + self.broadcasts_ls_min_interval < now):
-        s['ts_populated'] = now
-        self.populate_broadcasts(s['station_id'])
-      return ['.', '..'] + [k for k in self.broadcasts if self.broadcasts[k]['station_id'] == s['station_id']]
+    if(path == '/'): return ['.', '..'] + [k for k in self.stations]
+    path = path.split('/')
+    if len(path) != 2 or path[1] not in self.stations:
+      raise FuseOSError(ENOENT)
+    s = self.stations[path[1]]
+    self.populate_broadcasts_cached(s)
+    return ['.', '..'] + [k for k in self.broadcasts if self.broadcasts[k]['station_id'] == s['station_id']]
 
   def readlink(self, path):
     return self.data[path]
