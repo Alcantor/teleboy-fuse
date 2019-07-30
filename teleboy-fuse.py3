@@ -201,10 +201,12 @@ class Teleboy:
       seg_id += 1
 
 class TeleboyFS(LoggingMixIn, Operations):
-  def __init__(self, username, password):
+  def __init__(self, username, password, additionnal_time):
     self.stations = {}
     self.broadcasts = {}
     now = time.time()
+    self.broadcasts_ls_min_interval = 60
+    self.additionnal_time = additionnal_time
     self.root = {
       'st_mode': (S_IFDIR | 0o755),
       'st_ctime': now,
@@ -214,27 +216,20 @@ class TeleboyFS(LoggingMixIn, Operations):
       'st_gid': 0,
       'st_size': 1024
     }
-    self.config = {
-      'stat': {
-        'st_mode': (S_IFREG | 0o666),
-        'st_ctime': now,
-        'st_mtime': now,
-        'st_atime': now,
-        'st_uid': 0,
-        'st_gid': 0,
-        'st_size': 49
-      },
-      'data': "Do \"echo refresh > config\" to refresh broadcast.\n"
-    }
-
     self.t = Teleboy()
     self.t.login(username, password)
     self.populate_stations()
 
+  # Fill the stations dictionary
   def populate_stations(self):
+    i = 0
     now = time.time()
-    for station_id,station_label in self.t.tapi_get_stations():
-      self.stations["{:03}-{}".format(station_id,station_label)] = {
+    for id,label in self.t.tapi_get_stations():
+      i += 1
+      station_path = "ID-{:03}".format(id)
+      # Don't overwrite existing keys
+      if station_path in self.stations: continue
+      ino_dict = {
         'stat': {
           'st_mode': (S_IFDIR | 0o755),
           'st_ctime': now,
@@ -244,20 +239,36 @@ class TeleboyFS(LoggingMixIn, Operations):
           'st_gid': 0,
           'st_size': 1024
         },
-        'station_id': station_id,
-        'is_populated': False
+        'station_id': id,
+        'ts_populated': now-self.broadcasts_ls_min_interval
       }
+      self.stations[station_path] = ino_dict
+      self.stations["{:03}-{}".format(i,label)] = ino_dict
 
+  # Fill the broadcasts dictionary
   def populate_broadcasts(self, station_id):
-    base_url, seg_id, seg_ext, seg_duration = self.t.seg_get_live_last(station_id)
     now = time.time()
-    for id,slug,begin,end,station_id in self.t.tapi_get_epg(station_id, now-(6*60*60), now):
+    farback = now-(6*60*60)
+    i = 0
+    base_url, seg_id, seg_ext, seg_duration = self.t.seg_get_live_last(station_id)
+    # Remove old entries
+    first_available_seg_id = seg_id - int((now - farback)/seg_duration)
+    for k in list(self.broadcasts): # Copy the keys into a list
+      if self.broadcasts[k]['station_id'] == station_id:
+        if self.broadcasts[k]['seg_info'][2] < first_available_seg_id:
+          del self.broadcasts[k]
+    # Add new entries
+    for id,slug,begin,end,station_id in self.t.tapi_get_epg(station_id, farback, now):
+      broadcast_path = "ID-{:08}.ts".format(id)
+      # Don't overwrite existing keys
+      if broadcast_path in self.broadcasts: continue
+      begin = max(begin, farback)
       begin_seg_id = seg_id - int((now - begin)/seg_duration)
-      end_seg_id = seg_id - int((now - end)/seg_duration)
+      end_seg_id = seg_id - int((now - end + self.additionnal_time)/seg_duration)
       cache = os.path.join("cache",str(station_id))
       if not os.path.exists(cache):
         os.makedirs(cache)
-      self.broadcasts["{:08}-{}.ts".format(id,slug)] = {
+      ino_dict = {
         'stat': {
           'st_mode': (S_IFREG | 0o444),
           'st_ctime': now,
@@ -274,10 +285,12 @@ class TeleboyFS(LoggingMixIn, Operations):
         'cache': cache,
         'seg_info': (base_url, begin_seg_id, end_seg_id, seg_ext, seg_duration)
       }
+      self.broadcasts[broadcast_path] = ino_dict
+      self.broadcasts["{}-{}.ts".format(datetime.fromtimestamp(begin).strftime("%H%M"),slug)] = ino_dict
 
+  # Return the stat dictionary from a given path
   def get_path2stat(self, path):
     if (path == '/'): return self.root
-    if (path == '/config'): return self.config['stat']
     path = path[1:]
     if path in self.stations:
       return self.stations[path]['stat']
@@ -306,28 +319,23 @@ class TeleboyFS(LoggingMixIn, Operations):
     raise FuseOSError(EPERM)
 
   def open(self, path, flags):
-    if (path == '/config'): return 0
-    slug = os.path.basename(path)
-    if not slug in self.broadcasts:
+    broadcast_path = os.path.basename(path)
+    if not broadcast_path in self.broadcasts:
       raise FuseOSError(ENOENT)
-    b = self.broadcasts[slug]
+    b = self.broadcasts[broadcast_path]
 
     # File handle is the EPG id
     return b['id']
 
   def read(self, path, size, offset, fh):
-    if (path == '/config'):
-      return self.config['data'].encode('utf-8')[offset:offset+size]
-
-    slug = os.path.basename(path)
-    if not slug in self.broadcasts:
+    broadcast_path = os.path.basename(path)
+    if not broadcast_path in self.broadcasts:
       raise FuseOSError(ENOENT)
-    b = self.broadcasts[slug]
+    b = self.broadcasts[broadcast_path]
 
     # Variables
     base_url, seg_begin_id, seg_end_id, seg_ext, seg_duration = b['seg_info']
     cache = b['cache']
-    seg_id = seg_begin_id
     data = b""
 
     try:
@@ -355,17 +363,17 @@ class TeleboyFS(LoggingMixIn, Operations):
 
   def readdir(self, path, fh):
     if(path == '/'):
-      return ['.', '..', 'config'] + [k for k in self.stations]
+      return ['.', '..'] + [k for k in self.stations]
     else:
-      station_label = path[1:]
-      if station_label not in self.stations:
+      station_path = path[1:]
+      if station_path not in self.stations:
         raise FuseOSError(ENOENT)
-      s = self.stations[station_label]
-      station_id = s['station_id']
-      if not s['is_populated']:
-        self.populate_broadcasts(station_id)
-        s['is_populated'] = True
-      return ['.', '..'] + [k for k in self.broadcasts if self.broadcasts[k]['station_id'] == station_id]
+      s = self.stations[station_path]
+      now = time.time()
+      if(s['ts_populated'] + self.broadcasts_ls_min_interval < now):
+        s['ts_populated'] = now
+        self.populate_broadcasts(s['station_id'])
+      return ['.', '..'] + [k for k in self.broadcasts if self.broadcasts[k]['station_id'] == s['station_id']]
 
   def readlink(self, path):
     return self.data[path]
@@ -396,16 +404,10 @@ class TeleboyFS(LoggingMixIn, Operations):
     stat['st_mtime'] = mtime
 
   def write(self, path, data, offset, fh):
-    if(path == '/config'):
-      try: shutil.rmtree('cache') 
-      except: pass
-      self.populate_stations()
-      return len(data)
-    else:
-      raise FuseOSError(EPERM)
+    raise FuseOSError(EPERM)
 
-if len(sys.argv) < 4:
-  print(sys.argv[0],"login password mountpoint")
+if len(sys.argv) < 5:
+  print(sys.argv[0],"login password mountpoint additionnal_time")
 else:
-  FUSE(TeleboyFS(sys.argv[1],sys.argv[2]), sys.argv[3], nothreads=True, foreground=True)
+  FUSE(TeleboyFS(sys.argv[1],sys.argv[2], int(sys.argv[4])), sys.argv[3], nothreads=True, foreground=True)
 
